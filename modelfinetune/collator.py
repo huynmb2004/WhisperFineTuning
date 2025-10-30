@@ -53,4 +53,3 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 #     labels = pad_sequence(labels, batch_first=True)
 
 #     return {"input_features": input_features, "labels": labels}
-

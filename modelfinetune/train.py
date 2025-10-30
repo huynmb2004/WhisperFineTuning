@@ -6,9 +6,12 @@ import torch
 from collator import DataCollatorSpeechSeq2SeqWithPadding
 import optuna
 import gc
-from utils import chunking_and_mapping, loading_and_concatenating
+from utils import chunking_and_mapping, loading_and_concatenating, compute_metrics
 # from hypertune import objective
 from transformers import Seq2SeqTrainingArguments, Seq2SeqTrainer
+import warnings
+warnings.filterwarnings("ignore", message="MatMul8bitLt: inputs will be cast")
+
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print("Device:", device)
@@ -20,20 +23,26 @@ data_collator = DataCollatorSpeechSeq2SeqWithPadding(
 
 def objective(trial):
     # Các tham số cần tune
-    learning_rate = trial.suggest_loguniform('learning_rate', 1e-5, 1e-4)
-    per_device_train_batch_size = trial.suggest_categorical('per_device_train_batch_size', [2, 5, 10])
-    num_train_epochs = trial.suggest_int('num_train_epochs', 1, 3)
+    learning_rate=trial.suggest_loguniform('learning_rate', 1e-5, 5e-5)
+    per_device_train_batch_size=trial.suggest_categorical('per_device_train_batch_size', [2, 4, 8, 16])
+    gradient_accumulation_steps=trial.suggest_categorical('gradient_accumulation_steps', [1, 2, 4])
+    warmup_ratio=trial.suggest_categorical('warmup_ratio', [0.05, 0.1, 0.2])
+    weight_decay=trial.suggest_categorical('weight_decay', [0.01, 0.05, 0.1])
+    lr_scheduler_type=trial.suggest_categorical('lr_scheduler_type', ['cosine', 'linear'])
+    num_train_epochs=trial.suggest_int('num_train_epochs', 3, 8)
 
     # Khai báo TrainingArguments — sử dụng giá trị từ Optuna
     training_args = Seq2SeqTrainingArguments(
-        output_dir=f"/kaggle/working/whisper-base-optuna-{trial.number}",  
+        output_dir=f"./whisper-base-dadirri/whisper-base-optuna-{trial.number}",  
         per_device_train_batch_size=per_device_train_batch_size,
-        gradient_accumulation_steps=1,  
+        gradient_accumulation_steps=gradient_accumulation_steps,  
         learning_rate=learning_rate,
         num_train_epochs=num_train_epochs,
-        warmup_steps=100,
-        max_steps=400,
-        eval_steps=50,
+        warmup_ratio=warmup_ratio,
+        weight_decay=weight_decay,
+        lr_scheduler_type=lr_scheduler_type,
+        max_steps=500,
+        eval_steps=250,
         logging_steps=100,
         # disable gradient checkpointing and mixed precision for debugging double-backward issues
         gradient_checkpointing=False,
@@ -48,6 +57,8 @@ def objective(trial):
         metric_for_best_model="wer",
         greater_is_better=False,
         push_to_hub=False,  # nên tắt khi tuning
+        remove_unused_columns=False,
+        label_names=["labels"],
     )
 
     trainer = Seq2SeqTrainer(
@@ -57,12 +68,12 @@ def objective(trial):
         eval_dataset=dataset["validation"],
         data_collator=data_collator,
         tokenizer=processor.feature_extractor,
+        compute_metrics=compute_metrics,
     )
 
     # Enable anomaly detection to get clearer tracebacks for autograd errors
     try:
-        with torch.autograd.detect_anomaly():
-            trainer.train()
+        trainer.train()
     except Exception:
         # Re-raise after printing a marker so Optuna captures the trial failure
         import traceback
@@ -72,7 +83,7 @@ def objective(trial):
     return eval_results["eval_wer"]
 
 if __name__ == "__main__":
-    # path = "C:/Users/huyng/.cache/kagglehub/datasets/kynthesis/vivos-vietnamese-speech-corpus-for-asr/versions/1"
+    # path = "/home/intern-nmbhuy/Project/Dataset/archive"
 
     # train_csv_path = path + "/vivos/train/prompts.csv"
     # clean_test_csv_path = path + "/vivos/test/prompts.csv"
@@ -112,7 +123,7 @@ if __name__ == "__main__":
 
     # # Process each split
     # print("\nProcessing train split...")
-    # chunking_and_mapping(dataset["train"], "train", num_shards=1)
+    # chunking_and_mapping(dataset["train"], "train", num_shards=20)
 
     # print("\nProcessing validation split...")
     # chunking_and_mapping(dataset["validation"], "validation", num_shards=1)
@@ -125,9 +136,16 @@ if __name__ == "__main__":
     
     # print("\nAll splits processed successfully!")
 
+    print("\nLoading train...")
     train_dataset = loading_and_concatenating("train", num_shards=20)
+
+    print("\nLoading validation...")
     val_dataset = loading_and_concatenating("validation", num_shards=1)
+
+    print("\nLoading test_clean...")
     clean_test_dataset = loading_and_concatenating("test_clean", num_shards=1)
+
+    print("\nLoading test_noise...")
     noise_test_dataset = loading_and_concatenating("test_noise", num_shards=1)
 
     global dataset 
@@ -145,3 +163,9 @@ if __name__ == "__main__":
     print("Best hyperparameters:", study.best_params)
 
     best_params = study.best_params
+
+    
+
+
+
+
